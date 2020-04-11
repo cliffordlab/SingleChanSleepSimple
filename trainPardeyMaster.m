@@ -353,18 +353,17 @@ for fold = foldList
     
     % Balance Neural Network training set
     [balancedTrainingFeatures, balancedTrainingLabels] = ...
-        balanceBySelectedMethod(nnetTrainingFeatures, ... % Remove all stage 1 samples
-        nnetTrainingUnModLabels, ...
-        remove(containers.Map(sleepStages.keys,sleepStages.values),'n1'), ...  % Avoid removing subjects with no stage 1 samples
+        balanceBySelectedMethod(nnetTrainingFeatures, ... 
+        arrayfun(@(x) remap(x),nnetTrainingUnModLabels), ...
+        sleepCategories, ...  
         trainingSubjectList, ... % Adjust patient start indices for removed samples
-        balanceMethod, ...
-        [sleepStages('awake') sleepStages('rem')], ...
-        upsampleNNet);
+        balanceMethod);
     disp(['Reduced all NNet classes to ' num2str(length(balancedTrainingFeatures)) ' features for training.'])
     
     % Balance validation set
+    remappedValidationLabels = arrayfun(@(x) remap(x), validationUnModLabels);
     [balancedValidationFeatures, actualValidationCategories] = ...
-        balanceBySelectedMethod(validationFeatures,arrayfun(@(x) remap(x), validationUnModLabels),sleepCategories,validationSubjectList,'subsampleEpochs');
+        balanceBySelectedMethod(validationFeatures,remappedValidationLabels,sleepCategories,validationSubjectList,'subsampleEpochs');
     disp('Preprocessing complete')
     
     %% Model Training
@@ -375,7 +374,7 @@ for fold = foldList
         % Combine set of weak predictors
         % Note: training using every every 30th sample because all features
         % in single epoch are the same
-        [inputFeatures, oneHotLabels] = prepareInputsForTraining(balancedTrainingFeatures(1:epochLength:end,:), balancedTrainingLabels(1:epochLength:end), sleepStages);
+        [inputFeatures, oneHotLabels] = prepareInputsForTraining(balancedTrainingFeatures(1:epochLength:end,:), balancedTrainingLabels(1:epochLength:end), sleepCategories);
         predictor = train(ComboNet(ensembleMethod,predictorList),inputFeatures,oneHotLabels);
         
         save([workingDir runName strrep(datestr(now()),':','_') '_predictor'],'predictor')
@@ -383,10 +382,10 @@ for fold = foldList
         % Otherwise, train perceptron
         % Note: training using every every 30th sample because all features
         % in single epoch are the same
-        [inputFeatures, oneHotLabels] = prepareInputsForTraining(balancedTrainingFeatures(1:epochLength:end,:), balancedTrainingLabels(1:epochLength:end), sleepStages);
+        [inputFeatures, oneHotLabels] = prepareInputsForTraining(balancedTrainingFeatures(1:epochLength:end,:), balancedTrainingLabels(1:epochLength:end), sleepCategories);
         
         % Construct perceptron
-        pNet = patternnet(nnetLayer,'trainlm','crossentropy');
+        pNet = patternnet(nnetLayer,'trainlm','mse');
         pNet.Layers{1:(end-1)}.transferFcn = 'logsig';
         predictor = train(ComboNet(ensembleMethod,{pNet}),inputFeatures,oneHotLabels);
 
@@ -411,7 +410,7 @@ for fold = foldList
     
     predictedTrainCategories = predictor(balancedTrainingFeatures); % Predict sleep category
     
-    [C, overallStats] = stageConfusion(arrayfun(@(x) remap(x), balancedTrainingLabels),predictedTrainCategories,sleepCategories,'Training Data');
+    [C, overallStats] = stageConfusion(balancedTrainingLabels,predictedTrainCategories,sleepCategories,'Training Data');
     saveas(gcf,[workingDir runName strrep(datestr(now()),':','_') '_regression_train_confusion'])
     if ~isempty(reportLocationData)
         % Obtain information regarding where results should be printed to, if
@@ -450,6 +449,36 @@ for fold = foldList
         end
     end
     
+    % Report other sleep stage statistics
+    [mdl_sol,mdl_tst,mdl_waso,mdl_se] = calcSleepStats(predictor(validationFeatures),sleepCategories,validationSubjectList,epochLength);
+    [true_sol,true_tst,true_waso,true_se] = calcSleepStats(remappedValidationLabels,sleepCategories,validationSubjectList,epochLength);
+    disp('Sleep Onset Latency')
+    disp(['Model Average: ' num2str(mean(mdl_sol))])
+    disp(['True Model: ' num2str(mean(true_sol))])
+    disp(['Relative Error: ' num2str(mean((mdl_sol - true_sol)./true_sol))])
+    [R,~,RL,RU] = corrcoef(mdl_sol,true_sol);
+    disp(['Correlation: ' num2str(R(1,2)) ' (' num2str(RL(1,2)) ' - ' num2str(RU(1,2)) ')'])
+    
+    disp('Total Sleep Time')
+    disp(['Model Average: ' num2str(mean(mdl_tst))])
+    disp(['True Model: ' num2str(mean(true_tst))])
+    disp(['Relative Error: ' num2str(mean((mdl_tst - true_tst)./true_tst))])
+    [R,~,RL,RU] = corrcoef(mdl_tst,true_tst);
+    disp(['Correlation: ' num2str(R(1,2)) ' (' num2str(RL(1,2)) ' - ' num2str(RU(1,2)) ')'])
+    
+    disp('Wake After Sleep Onset')
+    disp(['Model Average: ' num2str(mean(mdl_waso))])
+    disp(['True Model: ' num2str(mean(true_waso))])
+    disp(['Relative Error: ' num2str(mean((mdl_waso - true_waso)./true_waso))])
+    [R,~,RL,RU] = corrcoef(mdl_waso,true_waso);
+    disp(['Correlation: ' num2str(R(1,2)) ' (' num2str(RL(1,2)) ' - ' num2str(RU(1,2)) ')'])
+    
+    disp('Sleep Efficiency')
+    disp(['Model Average: ' num2str(mean(mdl_se))])
+    disp(['True Model: ' num2str(mean(true_se))])
+    disp(['Relative Error: ' num2str(mean((mdl_se - true_se)./true_se))])
+    [R,~,RL,RU] = corrcoef(mdl_waso,true_se);
+    disp(['Correlation: ' num2str(R(1,2)) ' (' num2str(RL(1,2)) ' - ' num2str(RU(1,2)) ')'])
 end
 end
 
@@ -852,16 +881,16 @@ oneHotLabels = zeros(numFeatureVecs,4);
 inputFeatures = zeros(numFeatureVecs,featuresPerVector);
 parfor i = 1:numFeatureVecs
     % Assign output vector of binaries to each of the stages used
-    if labels(i) == stages('awake')
+    if labels(i) == stages('Wake')
         oneHotLabels(i,:) = [1 0 0 0];
         inputFeatures(i,:) = features(i,:);
-    elseif labels(i) == stages('rem')
+    elseif labels(i) == stages('REM')
         oneHotLabels(i,:) = [0 1 0 0];
         inputFeatures(i,:) = features(i,:);
-    elseif labels(i) == stages('n2')
+    elseif labels(i) == stages('Light')
         oneHotLabels(i,:) = [0 0 1 0];
         inputFeatures(i,:) = features(i,:);
-    elseif labels(i) == stages('n3')
+    elseif labels(i) == stages('Deep')
         oneHotLabels(i,:) = [0 0 0 1];
         inputFeatures(i,:) = features(i,:);
     end
@@ -1414,7 +1443,6 @@ balancedLabels = nan(10*3600*length(subjectList),1);
 balancedSubjectList = [];
 totalFeaturesAdded = 1;
 
-remove(stages,'undefined'); % Avoid removing subjects with no 'undefined' samples
 for i = 1:L
     % Get data from individual patients
     featuresFrom1Subj = features(subjectList(i):(subjectList(i+1)-1),:);
@@ -1470,4 +1498,40 @@ assert(~any(isnan(features),'all'),'Not all NaN''s removed from features');
 assert(length(labels) == length(features),'Labels and features are not the same size.');
 end
 
+function [sol,tst,waso,se] = calcSleepStats(labels,stages,startIndList,epochLength)
+% Find various sleep statistics of all subjects in list
+% 
+% INPUTS
+% labels -------- Array of sleep stage labels for each epoch
+% stages -------- Map linking sleep stage to numerical labels used in 'labels'
+% startIndList -- Locations of first element in 'labels' where each new subject's data starts
+% epochLength --- Duration (s) of each epoch
+% 
+% OUTPUTS
+% sol ----------- Sleep onset latency
+% tst ----------- Total sleep time
+% waso ---------- Wake after sleep onset
+% se ------------ Sleep efficiency
+
+L = length(startIndList);
+sol = nan(1,L);
+tst = nan(1,L);
+waso = nan(1,L);
+se = nan(1,L);
+
+startIndList(end+1) = length(labels);
+for i = 1:L
+    subjData = labels(startIndList(i):startIndList(i+1)); % Get all data from 1 subject
+    sol(i) = epochLength*find(subjData ~= stages('Wake'),1); % Sleep onset latency is time of first sample not equal to 'Wake' 
+    tst(i) = epochLength*sum(subjData ~= stages('Wake'));
+    waso(i) = epochLength*length(subjData) - tst(i) - sol(i);
+    se(i) = 100*tst(i)/(epochLength*length(subjData));
+end
+
+% Sanity checking
+assert(all(~isnan(sol)),'Sleep onset latencies calculated incorrectly')
+assert(all(~isnan(tst)),'Total sleep time calculated incorrectly')
+assert(all(~isnan(waso)),'Wake after sleep onset calculated incorrectly')
+assert(all(~isnan(se)),'Sleep efficiency calculated incorrectly')
+end
 
