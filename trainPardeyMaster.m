@@ -8,13 +8,14 @@ function predictor = trainPardeyMaster(trainingRecords,channel,workingDir,vararg
 % In the output directory, the following files will be created:
 % 
 % <DATE>_predictor.mat - Contains trained model. Can be reloaded and tested again using the 'savedMdls' optional argument or used
+% to create ensemble model.
 % <DATE>_kappaPerSubj<FOLD NUMBER>.mat - Contains list of kappa value of trained model prediction accuracy for each subject,
 % <DATE>_train_confusion.fig - Confusion plot of the trained model evaluated on the training data 
 % <DATE>_validation_confusion.fig - Confusion plot of the trained model evaluated on the validation data
 % 
 % REQUIRED INPUTS
 % trainingRecords ----- (string) Comma-separated list of .mat or .edf files to extract EEG data from (ex: 'file1.mat,file2.mat').
-% channel ------------- (string or Cell array of strings) Name of channel (ex: 'c4a1'), or possible names of channels if
+% channel ------------- (string or cell array of strings) Name of channel (ex: 'c4a1'), or possible names of channels if
 %                       same channel has multiple possible names (ex: {'c4a1','C4-A1'})
 % workingDir ---------- (string) Directory to save outputs or temporary files to.
 % 
@@ -46,9 +47,9 @@ function predictor = trainPardeyMaster(trainingRecords,channel,workingDir,vararg
 %                       (for example, if using 5 subjects total, passing the argument [1,3,4] would cause the first, third and
 %                       fourth subjects to be used for validation while the rest are used for training). 
 % removeSubjects ------ (int array) Specify subjects not to include in training or test.
-% writeReport --------- (String) Specify location where confusion matrix and performance can be printed do in format
-%                       '<file name>,<sheet name>,<start cell>'.
-% labelFiles ---------- (String) If labels in separate directory from data files, specify label file location and extension
+% writeReport --------- (string) Specify location where confusion matrix and performance can be printed do in format
+%                       '<FILE NAME>,<SHEET NAME>,<START CELL>'.
+% labelFiles ---------- (string) If labels in separate directory from data files, specify label file location and extension
 %                       as two separate values (ex: trainPardeyMaster(...,'labelFiles','path/labelDir',',txt')). It is
 %                       that each data file has a corresponding label file with the same name
 % Fs ------------------ (numeric) Sampling frequency of EEG in records. Unused if loading saved features.
