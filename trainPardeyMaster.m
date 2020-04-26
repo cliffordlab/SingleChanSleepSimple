@@ -1,23 +1,66 @@
-function predictor = trainPardeyMaster(trainingRecords,trainingSize,channel,workingDir,varargin)
-% Master code for training sleep-staging algorithm described in Pardey et al: https://onlinelibrary.wiley.com/doi/epdf/10.1111/j.1365-2869.1996.00201.x
-% trainingRecords is comma-separated list of file names to use in training
-% trainingSize is number of data points to use in training. If want to use
-% all points, enter 'all'
-%
-% Enter 'savedFeatures' followed by the name of a .mat file containing
-% saved features as additional arguments to skip feature extraction and
-% load the features from the .mat file
-% Example:
-% trainPardeyMaster([],'all','5*3600','','savedFeatures','200_subj_features.mat');
-%
-% Enter 'savedPNet' followed by the name of a .mat file containing a
-% saved perceptron as additional arguments to skip perceptron training and
-% load the perceptron from the .mat file
-% Example:
-% trainPardeyMaster([],'all','5*3600','','savedFeatures','200_subj_features.mat','savedPNet','200_subj_pNet.mat');
-%
-% Add the flag '-wakeIsRem' to train and test the model by grouping 'wake'
-% and 'REM' into a single sleep stage.
+function predictor = trainPardeyMaster(trainingRecords,channel,workingDir,varargin)
+% Master code for training and testing sleep-staging algorithm on a set of physionet records.
+% Currently supports formatting conventions used by Physionet's 2018 Challenge, Cyclic Alternating
+% Pattern and Sleep Heart Health Study datasets.
+% Performs 5-fold cross-validation unless specified to do otherwise using the -noCrossVal switch or when
+% the validation set is specified.
+% 
+% In the output directory, the following files will be created:
+% 
+% <DATE>_predictor.mat - Contains trained model. Can be reloaded and tested again using the 'savedMdls' optional argument or used
+% <DATE>_kappaPerSubj<FOLD NUMBER>.mat - Contains list of kappa value of trained model prediction accuracy for each subject,
+% <DATE>_train_confusion.fig - Confusion plot of the trained model evaluated on the training data 
+% <DATE>_validation_confusion.fig - Confusion plot of the trained model evaluated on the validation data
+% 
+% REQUIRED INPUTS
+% trainingRecords ----- (string) Comma-separated list of .mat or .edf files to extract EEG data from (ex: 'file1.mat,file2.mat').
+% channel ------------- (string or Cell array of strings) Name of channel (ex: 'c4a1'), or possible names of channels if
+%                       same channel has multiple possible names (ex: {'c4a1','C4-A1'})
+% workingDir ---------- (string) Directory to save outputs or temporary files to.
+% 
+% OUTPUTS
+% predictor ----------- ComboNet object used for predicting sleep stages 
+% 
+% OPTIONAL FLAGS
+% -noCrossVal --------- If this switch is present, perform single run instead of 5-fold cross-validation. If validation set not
+%                       specified, use the 0th fold.
+% -removeArousals ----- If this switch is present, remove epochs containing arousal events
+% -noFeatureRemoval --- If this switch is present, avoid removing dropped-out features during feature extraction.
+% -removeTrainTrans --- If this flag is present, remove 30s of data at both sides of the points at which the subject transitions
+%                       from one sleep stage to another in the training data
+% -removeValTrans ----- If this flag is present, remove 30s of data at both sides of the points at which the subject transitions
+%                       from one sleep stage to another in the validation data
+% 
+% OPTIONAL NAME-VALUE PAIRS
+% nnetNodes ----------- (int array) Array of widths of each layer in network. Only used if creating new weak learner. Default = [6]
+% ensemble ------------ (string) If provided, train ensemble model of provided weak learners instead of single new neural network.
+%                       Value should be name of .mat file containing cell array of ComboNet objects named
+% savedFeatures ------- (string) .mat containing extracted features, labels, and list of indices in the feature/label vectors where each
+%  		        patient's data begins. This .mat file is created whenever extracting features and can be re-loaded whenever
+%			on later runs in order to skip the feature extraction step.
+% savedMdls ----------- (string) Name of .mat file containing saved ComboNet object. If present, load the saved ComboNet object
+%                       and evaluate on validation set without training.
+% ARorder ------------- (int) Autoregression order used for extracting reflection coefficients with Burg's algorithm. Not used if
+%                       'savedFeatures' value is given. Unused if loading saved features. Default = 10.
+% validationSetChosen - (int array) Specify exactly which subjects to include in validation set as indices in the list of subjects
+%                       (for example, if using 5 subjects total, passing the argument [1,3,4] would cause the first, third and
+%                       fourth subjects to be used for validation while the rest are used for training). 
+% removeSubjects ------ (int array) Specify subjects not to include in training or test.
+% writeReport --------- (String) Specify location where confusion matrix and performance can be printed do in format
+%                       '<file name>,<sheet name>,<start cell>'.
+% labelFiles ---------- (String) If labels in separate directory from data files, specify label file location and extension
+%                       as two separate values (ex: trainPardeyMaster(...,'labelFiles','path/labelDir',',txt')). It is
+%                       that each data file has a corresponding label file with the same name
+% Fs ------------------ (numeric) Sampling frequency of EEG in records. Unused if loading saved features.
+% runName ------------- (string) Providing this value will cause any file that is saved to be saved into a directory within
+%                       workingDir with this name.
+% notationTranslator -- (string) Map sleep staging labels from any database to the labels used in the cinc 2018 dataset.
+%                       Example: to map the labels used in the sleep heart health study dataset (W,REM or R,S4,S3,S2,S1)
+%                       to the notation used in Cinc 2018 (awake,rem,n3,n2,n1), the following string is used:
+%                       'W=awake,REM=rem,R=rem,S4=n3,S3=n3,S2=n2,S1=n1'. Notice that multiple labels from one dataset can
+%                       be translated into one label used by Cinc, for example, when the labels 'REM' and 'R' are both used
+%                       interchangeably to refer to REM sleep. It can also be used to deal with datasets which use R&K instead
+%                       of AASM rules by mapping both stage 4 and stage 3 to the 'n3' label.
 
 
 %% Setup
@@ -26,8 +69,6 @@ sleepStages = containers.Map({'n3','n2','n1','rem','awake','undefined'},[0 1 2 3
 if (~isempty(find(strcmp(varargin,'-noCrossVal'))))
     % If this flag is entered as an input, perform single run instead of 5-fold cross-validation
     foldList = 0;
-elseif (~isempty(find(strcmp(varargin,'foldList'))))
-    foldList = str2num(varargin{find(strcmp(varargin,'foldList'))+1});
 else
     foldList = 0:4;
 end
@@ -37,7 +78,7 @@ for fold = foldList
     % cross-validation
     close all
     disp(['Beginning fold ' num2str(fold)])
-    clearvars -except fold sleepStages trainingRecords trainingSize channel workingDir varargin % Clear everything except setup and input variables
+    clearvars -except fold sleepStages trainingRecords channel workingDir varargin % Clear everything except setup and input variables
     rng(1); % Ensure replicability
     epochLength = 30;
     
@@ -108,6 +149,8 @@ for fold = foldList
     
     if (~isempty(find(strcmp(varargin,'balanceMethod'))))
         % Choose upsampling method: smote/nnet/subsampleEpochs
+	% NOTE: This feature is under development and is not recommended
+	% for general use.
         balanceMethod = varargin{find(strcmp(varargin,'balanceMethod'))+1};
     else
         % Default
@@ -166,55 +209,27 @@ for fold = foldList
         end
     end
     
-    
-    % Obtain method of mapping sleep stage labels into combined categories
-    if ~isempty(find(strcmp(varargin,'recategorize')))
-        % remap and categoryDepth take a number as their key, so to change
-        % their key type to 'double' (instead of the default, 'char'), they
-        % must be initialized with a single key-pair value, which is then
-        % removed.
-        remap = containers.Map(1,1);
-        remove(remap,1);
-        sleepCategories = containers.Map();
-        
-        stageGroupings = strtrim(strsplit(varargin{find(strcmp(varargin,'recategorize'))+1},',')); % Separate categories
-        L = length(stageGroupings);
-        for i = 1:L
-            % Loop through each category
-            tmpCell = strtrim(strsplit(stageGroupings{i},'=')); % Separate category name from the sleep stages belonging to it
-            categoryName = tmpCell{1};
-            stageNames = strtrim(strsplit(tmpCell{2},'&')); % Separate stages within category
-            M = length(stageNames);
-            for j = 1:M
-                % Loop through stages
-                remap(sleepStages(stageNames{j})) = i; % Numerical label of sleep stage is mapped to numerical label for category
-            end
-            sleepCategories(categoryName) = i; % Maps category name to numerical label
-        end
-    else
-        % Defaults
-        sleepCategories = containers.Map({'Deep','Light','REM','Awake'},[1 2 3 4]); % Maps sleep stage categories to their numerical labels
-        remap = containers.Map([sleepStages('n3'),sleepStages('n2'),sleepStages('n1'),sleepStages('rem'),sleepStages('awake')] ...
+    sleepCategories = containers.Map({'Deep','Light','REM','Awake'},[1 2 3 4]); % Maps sleep stage categories to their numerical labels
+    remap = containers.Map([sleepStages('n3'),sleepStages('n2'),sleepStages('n1'),sleepStages('rem'),sleepStages('awake')] ...
             ,[sleepCategories('Deep'),sleepCategories('Light'),sleepCategories('Light'),sleepCategories('REM'),sleepCategories('Awake')]);
-    end
     
-    if (~isempty(find(strcmp(varargin,'-removeTrainingTransitions'))))
+     if (~isempty(find(strcmp(varargin,'-removeTrainTrans'))))
         % If this flag is present, remove 30s of data at both sides of the
         % points at which the subject transitions from one sleep stage to
         % another in the training data
-        removeTrainingTransitions = true;
+        removeTrainTrans = true;
     else
-        removeTrainingTransitions = false;
+        removeTrainTrans = false;
     end
     
     
-    if (~isempty(find(strcmp(varargin,'-removeValidationTransitions'))))
+    if (~isempty(find(strcmp(varargin,'-removeValTrans'))))
         % If this flag is present, remove 30s of data at both sides of the
         % points at which the subject transitions from one sleep stage to
-        % another in the training data
-        removeValidationTransitions = true;
+        % another in the validation data
+        removeValTrans = true;
     else
-        removeValidationTransitions = false;
+        removeValTrans = false;
     end
     
     if (~isempty(find(strcmp(varargin,'savedMdls'))))
@@ -241,7 +256,7 @@ for fold = foldList
     else
         % Otherwise, extract them from eeg data
         [features, labels, unModLabels, subjectList,recordNames] = ...
-            extractFeaturesFromData(trainingRecords,trainingSize,Fs,sleepStages,translatorMap,channel,ignore,labelFileLocation,labelFileExtension,false,noFeatureRemoval,ARorder,workingDir,runName);
+            extractFeaturesFromData(trainingRecords,Fs,sleepStages,translatorMap,channel,ignore,labelFileLocation,labelFileExtension,false,noFeatureRemoval,ARorder,workingDir,runName);
         save([workingDir runName strrep(datestr(now()),':','_') '_features'],'features','labels','unModLabels','subjectList','recordNames','-v7.3')
         disp('Features extracted')
     end
@@ -322,7 +337,7 @@ for fold = foldList
     validationFeatures = features(validationIndices,:);
     validationLabels = labels(validationIndices);
     validationUnModLabels = unModLabels(validationIndices);
-    [validationFeatures,validationLabels,validationUnModLabels,validationSubjectList] = removeUnwantedFeatures(validationFeatures,validationLabels,validationUnModLabels,validationSubjectList,removeValidationTransitions,false,sleepStages);
+    [validationFeatures,validationLabels,validationUnModLabels,validationSubjectList] = removeUnwantedFeatures(validationFeatures,validationLabels,validationUnModLabels,validationSubjectList,removeValTrans,false,sleepStages);
     
     % Obtain neural network training data
     nnetTrainingFeatures = features(nnetTrainingIndices,:);
@@ -332,7 +347,7 @@ for fold = foldList
         nnetTrainingLabels, ...
         nnetTrainingUnModLabels, ...
         trainingSubjectList, ...
-        removeTrainingTransitions, ...
+        removeTrainTrans, ...
         removeArousals, ...
         sleepStages); % Remove unwanted samples
     
@@ -400,7 +415,7 @@ for fold = foldList
         nnetTrainingLabels, ...
         nnetTrainingUnModLabels, ...
         trainingSubjectList, ...
-        removeTrainingTransitions,false,sleepStages);
+        removeTrainTrans,false,sleepStages);
     kappaPerSubj = getKappaPerSubj(clusteringFeatures,arrayfun(@(x) remap(x),clusteringUnModLabels),clusteringSubjectList,predictor);
     disp(['Saving data to ' [workingDir runName strrep(datestr(now()),':','_') '_kappaPerSubj' num2str(fold)]])
     save([workingDir runName strrep(datestr(now()),':','_') '_kappaPerSubj' num2str(fold)],'kappaPerSubj','-v7.3')
@@ -411,7 +426,7 @@ for fold = foldList
     predictedTrainCategories = predictor(balancedTrainingFeatures); % Predict sleep category
     
     [C, overallStats] = stageConfusion(balancedTrainingLabels,predictedTrainCategories,sleepCategories,'Training Data');
-    saveas(gcf,[workingDir runName strrep(datestr(now()),':','_') '_regression_train_confusion'])
+    saveas(gcf,[workingDir runName strrep(datestr(now()),':','_') '_train_confusion'])
     if ~isempty(reportLocationData)
         % Obtain information regarding where results should be printed to, if
         % any
@@ -436,7 +451,7 @@ for fold = foldList
     predictedValdiationCategories = predictor(balancedValidationFeatures); % Predict sleep category
     
     [C, overallStats] = stageConfusion(actualValidationCategories,predictedValdiationCategories,sleepCategories,'Validation Data');
-    saveas(gcf,[workingDir runName strrep(datestr(now()),':','_') '_nnet_train_confusion'])
+    saveas(gcf,[workingDir runName strrep(datestr(now()),':','_') '_validation_confusion'])
     if ~isempty(reportLocationData)
         % Obtain information regarding where results should be printed to, if
         % any
@@ -658,7 +673,7 @@ for i =1:L
 end
 end
 
-function [features, labels, unModLabels, subjectList, recordNames] = extractFeaturesFromData(records,sizeData,Fs,stages,translatorMap,channelNames,ignore,labelFileLocation,labelFileExtension,ignoreWrongSamplingRate,noFeatureRemoval,ARorder,workingDir,runName)
+function [features, labels, unModLabels, subjectList, recordNames] = extractFeaturesFromData(records,Fs,stages,translatorMap,channelNames,ignore,labelFileLocation,labelFileExtension,ignoreWrongSamplingRate,noFeatureRemoval,ARorder,workingDir,runName)
 % Extract EEG from records, then obtain features from data
 trainingRecordsList = strsplit(records,',');
 L = length(trainingRecordsList);
